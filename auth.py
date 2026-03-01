@@ -1,419 +1,252 @@
 """
-Authentication Routes
+Authentication Module
 =====================
 
-API endpoints for user authentication:
-- User registration
-- User login
-- Token refresh
-- Logout
-
-Endpoints:
-- POST /api/auth/register - Register new user
-- POST /api/auth/login - Login user
-- POST /api/auth/refresh - Refresh access token
-- POST /api/auth/logout - Logout user
+This module handles all authentication-related operations:
+- Password hashing and verification using bcrypt
+- JWT token creation and validation
+- User authentication logic
+- Token refresh mechanisms
 
 Author: Manus AI
 Version: 1.0.0
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
-import logging
+from datetime import datetime, timedelta, timezone
+from typing import Optional, Dict, Any
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+import os
 
-# Import from parent modules
-import sys
-sys.path.append('..')
-from database import get_db, User, create_user, get_user_by_username, get_user_by_id
-from auth import (
-    hash_password, verify_password, create_tokens_for_user,
-    validate_token_and_get_user_id, verify_token
-)
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-logger = logging.getLogger(__name__)
-router = APIRouter()
+# Secret key for JWT encoding - CHANGE THIS IN PRODUCTION!
+SECRET_KEY = os.getenv("SECRET_KEY", "your-secret-key-change-this-in-production")
+
+# JWT algorithm
+ALGORITHM = "HS256"
+
+# Token expiration time (in minutes)
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+
+# Password hashing context
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
 # ============================================================================
-# REQUEST/RESPONSE MODELS
+# PASSWORD HASHING
 # ============================================================================
 
-class UserRegisterRequest(BaseModel):
-    """User registration request model"""
-    username: str = Field(..., min_length=3, max_length=50, description="Username (3-50 chars)")
-    email: EmailStr = Field(..., description="Valid email address")
-    password: str = Field(..., min_length=8, description="Password (minimum 8 chars)")
-    full_name: Optional[str] = Field(None, max_length=100, description="Full name")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "username": "johndoe",
-                "email": "john@example.com",
-                "password": "securepassword123",
-                "full_name": "John Doe"
-            }
-        }
-
-
-class UserLoginRequest(BaseModel):
-    """User login request model"""
-    username: str = Field(..., description="Username or email")
-    password: str = Field(..., description="Password")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "username": "johndoe",
-                "password": "securepassword123"
-            }
-        }
-
-
-class TokenRefreshRequest(BaseModel):
-    """Token refresh request model"""
-    refresh_token: str = Field(..., description="Refresh token")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-            }
-        }
-
-
-class TokenResponse(BaseModel):
-    """Token response model"""
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
-    expires_in: int
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-                "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
-                "token_type": "bearer",
-                "expires_in": 1800
-            }
-        }
-
-
-class UserResponse(BaseModel):
-    """User response model (for API responses)"""
-    id: int
-    username: str
-    email: str
-    full_name: Optional[str]
-    is_active: bool
-    
-    class Config:
-        from_attributes = True
-        json_schema_extra = {
-            "example": {
-                "id": 1,
-                "username": "johndoe",
-                "email": "john@example.com",
-                "full_name": "John Doe",
-                "is_active": True
-            }
-        }
-
-
-class MessageResponse(BaseModel):
-    """Generic message response"""
-    message: str
-    success: bool = True
-
-
-# ============================================================================
-# DEPENDENCY: GET CURRENT USER
-# ============================================================================
-
-async def get_current_user(
-    authorization: str = None,
-    db: Session = Depends(get_db)
-) -> User:
+def hash_password(password: str) -> str:
     """
-    Dependency to get the current authenticated user from JWT token.
+    Hash a password using bcrypt.
     
     Args:
-        authorization: Authorization header (Bearer token)
-        db: Database session
+        password: Plain text password to hash
         
     Returns:
-        User: The authenticated user
+        str: Hashed password
         
-    Raises:
-        HTTPException: If token is invalid or user not found
-        
-    Usage in routes:
-        @app.get("/protected")
-        def protected_route(current_user: User = Depends(get_current_user)):
-            return {"message": f"Hello {current_user.username}"}
+    Example:
+        hashed = hash_password("mypassword123")
     """
-    if not authorization:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing authorization header",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    return pwd_context.hash(password)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a plain text password against a hashed password.
     
-    # Extract token from "Bearer <token>"
+    Args:
+        plain_password: Plain text password to verify
+        hashed_password: Hashed password from database
+        
+    Returns:
+        bool: True if password matches, False otherwise
+        
+    Example:
+        is_valid = verify_password("mypassword123", hashed_from_db)
+    """
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+# ============================================================================
+# JWT TOKEN HANDLING
+# ============================================================================
+
+def create_access_token(data: Dict[str, Any], expires_delta: Optional[timedelta] = None) -> str:
+    """
+    Create a JWT access token.
+    
+    Args:
+        data: Dictionary containing token claims (e.g., {"sub": "user_id"})
+        expires_delta: Optional custom expiration time
+        
+    Returns:
+        str: Encoded JWT token
+        
+    Example:
+        token = create_access_token({"sub": "user123"})
+    """
+    to_encode = data.copy()
+    
+    # Set expiration time
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({"exp": expire})
+    
+    # Encode token
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def create_refresh_token(data: Dict[str, Any]) -> str:
+    """
+    Create a JWT refresh token with longer expiration.
+    
+    Args:
+        data: Dictionary containing token claims
+        
+    Returns:
+        str: Encoded refresh token
+        
+    Example:
+        refresh_token = create_refresh_token({"sub": "user123"})
+    """
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    to_encode.update({"exp": expire})
+    
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+
+def verify_token(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Verify and decode a JWT token.
+    
+    Args:
+        token: JWT token to verify
+        
+    Returns:
+        dict or None: Decoded token payload if valid, None if invalid
+        
+    Example:
+        payload = verify_token(token_string)
+        if payload:
+            user_id = payload.get("sub")
+    """
     try:
-        scheme, token = authorization.split()
-        if scheme.lower() != "bearer":
-            raise ValueError("Invalid authentication scheme")
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        return payload
+    except JWTError as e:
+        print(f"Token verification failed: {str(e)}")
+        return None
+
+
+def get_user_id_from_token(token: str) -> Optional[str]:
+    """
+    Extract user ID from a JWT token.
     
-    # Validate token and get user ID
-    user_id = validate_token_and_get_user_id(token)
-    if user_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired token",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # Get user from database
-    user = get_user_by_id(db, user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-        )
-    
-    if not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive",
-        )
-    
-    return user
+    Args:
+        token: JWT token
+        
+    Returns:
+        str or None: User ID if token is valid, None otherwise
+        
+    Example:
+        user_id = get_user_id_from_token(token)
+    """
+    payload = verify_token(token)
+    if payload:
+        return payload.get("sub")
+    return None
 
 
 # ============================================================================
-# ROUTES
+# TOKEN RESPONSE MODELS
 # ============================================================================
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-async def register(request: UserRegisterRequest, db: Session = Depends(get_db)):
+class TokenResponse:
     """
-    Register a new user.
+    Represents a token response with access and refresh tokens.
+    
+    Attributes:
+        access_token: JWT access token
+        refresh_token: JWT refresh token
+        token_type: Type of token (always "bearer")
+        expires_in: Seconds until access token expires
+    """
+    
+    def __init__(self, access_token: str, refresh_token: str, expires_in: int = ACCESS_TOKEN_EXPIRE_MINUTES * 60):
+        self.access_token = access_token
+        self.refresh_token = refresh_token
+        self.token_type = "bearer"
+        self.expires_in = expires_in
+    
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON response"""
+        return {
+            "access_token": self.access_token,
+            "refresh_token": self.refresh_token,
+            "token_type": self.token_type,
+            "expires_in": self.expires_in
+        }
+
+
+# ============================================================================
+# AUTHENTICATION HELPERS
+# ============================================================================
+
+def create_tokens_for_user(user_id: int) -> TokenResponse:
+    """
+    Create both access and refresh tokens for a user.
     
     Args:
-        request: Registration request with username, email, password
-        db: Database session
+        user_id: ID of the user
         
     Returns:
-        UserResponse: Created user information
-        
-    Raises:
-        HTTPException: If username or email already exists
+        TokenResponse: Object containing both tokens
         
     Example:
-        POST /api/auth/register
-        {
-            "username": "johndoe",
-            "email": "john@example.com",
-            "password": "securepassword123",
-            "full_name": "John Doe"
-        }
+        tokens = create_tokens_for_user(user.id)
+        return tokens.to_dict()
     """
-    # Check if username already exists
-    existing_user = get_user_by_username(db, request.username)
-    if existing_user:
-        logger.warning(f"Registration failed: Username '{request.username}' already exists")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Username already registered"
-        )
+    access_token = create_access_token({"sub": str(user_id)})
+    refresh_token = create_refresh_token({"sub": str(user_id)})
     
-    # Hash password
-    hashed_password = hash_password(request.password)
+    return TokenResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60
+    )
+
+
+def validate_token_and_get_user_id(token: str) -> Optional[int]:
+    """
+    Validate a token and return the user ID if valid.
     
-    # Create user
+    Args:
+        token: JWT token to validate
+        
+    Returns:
+        int or None: User ID if token is valid, None otherwise
+        
+    Example:
+        user_id = validate_token_and_get_user_id(token)
+        if user_id:
+            user = get_user_by_id(db, user_id)
+    """
     try:
-        user = create_user(
-            db=db,
-            username=request.username,
-            email=request.email,
-            hashed_password=hashed_password,
-            full_name=request.full_name
-        )
-        logger.info(f"✅ New user registered: {request.username}")
-        return user
-    
-    except Exception as e:
-        logger.error(f"Error creating user: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to create user"
-        )
-
-
-@router.post("/login", response_model=TokenResponse)
-async def login(request: UserLoginRequest, db: Session = Depends(get_db)):
-    """
-    Login user and return JWT tokens.
-    
-    Args:
-        request: Login request with username and password
-        db: Database session
-        
-    Returns:
-        TokenResponse: Access token, refresh token, and expiration info
-        
-    Raises:
-        HTTPException: If credentials are invalid
-        
-    Example:
-        POST /api/auth/login
-        {
-            "username": "johndoe",
-            "password": "securepassword123"
-        }
-    """
-    # Get user by username
-    user = get_user_by_username(db, request.username)
-    
-    if not user:
-        logger.warning(f"Login failed: User '{request.username}' not found")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-    
-    # Verify password
-    if not verify_password(request.password, user.hashed_password):
-        logger.warning(f"Login failed: Invalid password for user '{request.username}'")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid username or password"
-        )
-    
-    if not user.is_active:
-        logger.warning(f"Login failed: User '{request.username}' is inactive")
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="User account is inactive"
-        )
-    
-    # Create tokens
-    tokens = create_tokens_for_user(user.id)
-    logger.info(f"✅ User logged in: {request.username}")
-    
-    return tokens.to_dict()
-
-
-@router.post("/refresh", response_model=TokenResponse)
-async def refresh_token(request: TokenRefreshRequest, db: Session = Depends(get_db)):
-    """
-    Refresh access token using refresh token.
-    
-    Args:
-        request: Refresh token request
-        db: Database session
-        
-    Returns:
-        TokenResponse: New access token
-        
-    Raises:
-        HTTPException: If refresh token is invalid
-        
-    Example:
-        POST /api/auth/refresh
-        {
-            "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
-        }
-    """
-    # Verify refresh token
-    payload = verify_token(request.refresh_token)
-    if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or expired refresh token"
-        )
-    
-    # Get user ID from token
-    user_id_str = payload.get("sub")
-    if not user_id_str:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid token payload"
-        )
-    
-    try:
-        user_id = int(user_id_str)
-    except ValueError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid user ID in token"
-        )
-    
-    # Get user from database
-    user = get_user_by_id(db, user_id)
-    if not user or not user.is_active:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found or inactive"
-        )
-    
-    # Create new tokens
-    tokens = create_tokens_for_user(user.id)
-    logger.info(f"✅ Token refreshed for user ID: {user_id}")
-    
-    return tokens.to_dict()
-
-
-@router.post("/logout", response_model=MessageResponse)
-async def logout(current_user: User = Depends(get_current_user)):
-    """
-    Logout user (client-side token deletion).
-    
-    Note: JWT tokens cannot be revoked server-side. The client should delete
-    the token from localStorage/sessionStorage. For production, implement
-    a token blacklist in Redis or database.
-    
-    Args:
-        current_user: Current authenticated user
-        
-    Returns:
-        MessageResponse: Logout confirmation
-        
-    Example:
-        POST /api/auth/logout
-        Headers: Authorization: Bearer <token>
-    """
-    logger.info(f"✅ User logged out: {current_user.username}")
-    return {
-        "message": "Successfully logged out. Please delete tokens from client storage.",
-        "success": True
-    }
-
-
-@router.get("/me", response_model=UserResponse)
-async def get_me(current_user: User = Depends(get_current_user)):
-    """
-    Get current authenticated user information.
-    
-    Args:
-        current_user: Current authenticated user
-        
-    Returns:
-        UserResponse: Current user information
-        
-    Example:
-        GET /api/auth/me
-        Headers: Authorization: Bearer <token>
-    """
-    return current_user
+        user_id_str = get_user_id_from_token(token)
+        if user_id_str:
+            return int(user_id_str)
+    except (ValueError, TypeError):
+        pass
+    return None

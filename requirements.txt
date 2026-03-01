@@ -1,0 +1,58 @@
+# Rizwan Universal AI Backend - Python Dependencies
+# ===================================================
+# Install with: pip install -r requirements.txt
+# For development: pip install -r requirements.txt && pip install -r requirements-dev.txt
+
+# Core Framework
+fastapi==0.104.1                 # Modern Python web framework
+uvicorn==0.24.0                  # ASGI server for FastAPI
+pydantic==2.5.0                  # Data validation using Python type annotations
+pydantic-settings==2.1.0         # Settings management with Pydantic
+
+# Database
+sqlalchemy==2.0.23               # SQL toolkit and ORM
+mysql-connector-python==8.2.0    # MySQL database driver (or use: mysqlclient)
+# Alternative: psycopg2-binary==2.9.9  # PostgreSQL driver (if using PostgreSQL)
+
+# Authentication & Security
+python-jose==3.3.0               # JWT token handling
+passlib==1.7.4                   # Password hashing
+bcrypt==4.1.1                    # Bcrypt password hashing
+python-multipart==0.0.6          # Form data parsing
+
+# AI/LLM Integration
+openai==1.3.0                    # OpenAI API client
+# Alternative: anthropic==0.7.0   # Claude API (optional)
+# Alternative: huggingface-hub==0.19.0  # Hugging Face models (optional)
+
+# File Handling
+python-docx==0.8.11              # Word document handling
+openpyxl==3.11.0                 # Excel file handling
+PyPDF2==3.0.1                    # PDF manipulation
+Pillow==10.1.0                   # Image processing
+python-pptx==0.6.21              # PowerPoint handling
+
+# Image & Media Processing
+opencv-python==4.8.1.78          # Computer vision library
+pyttsx3==2.90                    # Text-to-speech
+# Alternative: gTTS==2.3.2        # Google Text-to-Speech
+
+# Data Processing
+pandas==2.1.3                    # Data manipulation
+numpy==1.26.2                    # Numerical computing
+
+# Utilities
+python-dotenv==1.0.0             # Environment variable management
+requests==2.31.0                 # HTTP client
+aiofiles==23.2.1                 # Async file operations
+
+# Logging & Monitoring
+python-json-logger==2.0.7        # JSON logging
+# Alternative: sentry-sdk==1.38.0  # Error tracking (optional)
+
+# Development (optional, install separately)
+# pytest==7.4.3                   # Testing framework
+# pytest-asyncio==0.21.1          # Async test support
+# black==23.12.0                  # Code formatter
+# flake8==6.1.0                   # Code linter
+# mypy==1.7.1                     # Static type checker
